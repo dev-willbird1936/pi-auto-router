@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jev router</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <strong>Jev router</strong>
+      <span class="muted">Send a message. Jev reads the conversation, a fixed policy picks the model from the active auto-router profile.</span>
+    </div>
+    <div class="top-right">
+      <label>Profile
+        <select id="profile"></select>
+      </label>
+      <span id="status" class="status">idle</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="left">
+      <div class="row-head">
+        <h2>Conversation</h2>
+        <button type="button" id="clear" class="link">Clear</button>
+      </div>
+      <div id="thread" class="thread"></div>
+      <form id="composer">
+        <textarea id="input" placeholder="Write a message." rows="4"></textarea>
+        <div class="composer-meta">
+          <span class="muted">Enter to send. Shift+Enter for a new line.</span>
+          <button type="submit">Send</button>
+        </div>
+      </form>
+      <div id="chips" class="chips"></div>
+    </section>
+
+    <aside class="right">
+      <div class="row-head">
+        <h2>Jev's read</h2>
+        <span id="read-meta" class="muted"></span>
+      </div>
+      <div id="read" class="read"></div>
+      <div class="row-head">
+        <h2>Route</h2>
+        <span class="muted">deterministic policy</span>
+      </div>
+      <ol id="steps" class="steps"></ol>
+      <div id="models" class="models"></div>
+    </aside>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

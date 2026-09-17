@@ -1,0 +1,31 @@
+{
+  "name": "pi-auto-router",
+  "version": "0.1.0",
+  "description": "Scale-based auto router for Pi Coding Agent: judge prompt scale, route none/low/medium/high with intra-bucket float and switchable presets.",
+  "author": "dev-willbird1936",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-extension", "models", "router", "auto"],
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": ["src", "web", "README.md", "LICENSE", "setup.bat", "launch.bat", "launch-jev.bat"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "demo": "bun web/server.ts"
+  },
+  "pi": {
+    "extensions": ["./src/extension.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.84.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.0",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.0"
+  }
+}
