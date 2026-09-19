@@ -1,5 +1,7 @@
 # Pi Auto Router
 
+By [dev-willbird1936](https://github.com/dev-willbird1936).
+
 Score-based auto router. Each prompt is scored with [TypeSafe Jev](https://docs.typesafe.ai/introduction) (atomic Choice / Score / Noul questions composed in code), then the resolver turns those scores into a model and thinking level from the active profile.
 
 ```

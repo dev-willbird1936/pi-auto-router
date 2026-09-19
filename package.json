@@ -2,7 +2,10 @@
   "name": "pi-auto-router",
   "version": "0.1.0",
   "description": "Score-based auto router for Pi Coding Agent: judge prompt scale, route none through ultra with intra-band model pick and switchable profiles.",
-  "author": "dev-willbird1936",
+  "author": {
+    "name": "dev-willbird1936",
+    "url": "https://github.com/dev-willbird1936"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
