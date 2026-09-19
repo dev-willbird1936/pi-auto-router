@@ -135,6 +135,36 @@ export function buildRouteDecision(config: RouterConfig, scores: Scores): RouteD
   };
 }
 
+/**
+ * None/minimal work - a greeting, a question, a one-line lookup - is answered
+ * by the parent in the chat it was asked in: launching a worker costs more
+ * than the task. A forced model is an explicit instruction about who does the
+ * work, so it still dispatches.
+ *
+ * Uses the judged scores, not the resolved thinking band: a model's
+ * thinkingOverride (haiku:high on the Claude none-tier) would otherwise send
+ * every greeting to a worker.
+ */
+export function answerInline(decision: RouteDecision, kind?: string): boolean {
+  if (decision.modelOverridden) return false;
+  if (kind === "chat") return true;
+  const modelLevel = canonicalLevelForScore(decision.debug.model_score);
+  const thinkLevel = canonicalLevelForScore(decision.debug.thinking_score);
+  const trivial = (level: CanonicalLevel): boolean => level === "none" || level === "minimal";
+  if (trivial(modelLevel) && trivial(thinkLevel)) return true;
+  // A cheap lookup (time, what a flag does) stays in chat. A specialist quiz
+  // (Sylow theorems) scores medium+ and still launches one worker.
+  return kind === "lookup" && (modelLevel === "none" || modelLevel === "minimal" || modelLevel === "low") && trivial(thinkLevel);
+}
+
+/** After a split: chat/lookup pieces stay with the parent even when they score
+ * above none/minimal (explain dosing, state a definition). Task pieces dispatch. */
+export function keepWithParent(decision: RouteDecision, kind?: string): boolean {
+  if (decision.modelOverridden) return false;
+  if (kind === "chat" || kind === "lookup") return true;
+  return answerInline(decision, kind);
+}
+
 export interface OrchestrationResult {
   requested: boolean;
   available: boolean;

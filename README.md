@@ -1,12 +1,29 @@
 # Pi Auto Router
 
-Score-based auto router. **This experimental branch** scores each prompt with [TypeSafe Jev](https://docs.typesafe.ai/introduction) (atomic Choice / Score / Noul questions composed in code), then the existing resolver turns those scores into a model and thinking level from the active profile.
+Score-based auto router. Each prompt is scored with [TypeSafe Jev](https://docs.typesafe.ai/introduction) (atomic Choice / Score / Noul questions composed in code), then the resolver turns those scores into a model and thinking level from the active profile.
 
 ```
-request -> Jev (atomic questions) -> compose model_score, thinking_score -> resolver (tier, model, native thinking) -> executor
+request -> split check -> Jev -> scores -> resolver -> parent stays on current model -> worker subagent (routed model/thinking) -> parent summarizes
+                      \-> split -> Jev per task -> resolver per task -> parallel workers (async) -> parent synthesizes
 ```
 
-`useJev` defaults on. `/auto-router-jev off` restores the previous LLM judge. If the TypeSafe key is missing, scoring falls back to the local heuristic.
+None/minimal work never leaves the chat: the parent answers it directly (see [Split check](#split-check)).
+
+`useJev` defaults on. If the TypeSafe key is missing or Jev fails, the **prompted model** (the agent already selected for the turn) scores the request. `/auto-router-jev off` skips Jev and uses that LLM judge directly. An explicit other model/thinking for the judge is supported but **not recommended** (`/auto-router-judge`). The local heuristic is a last resort.
+
+## Install
+
+```text
+pi install git:github.com/dev-willbird1936/pi-auto-router
+```
+
+For a local checkout:
+
+```text
+pi install /path/to/pi-auto-router
+```
+
+On Windows, `setup.bat` installs dependencies; `launch.bat` starts Pi with this source extension loaded temporarily. Restart Pi or run `/reload` after install.
 
 ## Canonical scale
 
@@ -25,16 +42,37 @@ Both axes share the same eight bands. Ranges are intentionally unequal — Max a
 
 `ultra` has no native Pi thinking level; it is synthetic (see Ultra below).
 
+## Split check
+
+Stage 0, before the judge: is this request worth more than one agent? It is deliberately cheap — a keyword read of the prompt always, plus one Jev call when Jev is on and keyed. It says yes when either:
+
+- the user asked for it outright ("use subagents", "in parallel", "split this up", "separate agents"), or
+- Jev reads **two or more substantial independent jobs** (separate files, packages, reviews, proofs, implementations). A quiz of lookups, a pipeline, or a coupled one-file edit stays one task.
+
+Cheap extras next to real work (the time, a greeting, a short lookup) still split out as their own tasks. After scoring, those pieces stay with the parent; only the worker-worthy pieces launch `worker`s. A split of only cheap pieces is answered in chat with no worker.
+
+Only then does the splitter run. A local, deterministic split runs first (numbered items, "and also", independent file reviews, two work clauses). If that finds fewer than two tasks, one completion on the judge model writes the list. Fewer than two tasks means "not a split" and the request routes as one task.
+
+Each worker-worthy task is judged and resolved on its own, so a hard task and an easy task in the same request get different models and thinking levels. The parent is told to answer any cheap parts itself and to launch one `worker` per remaining task. Two or more workers run in parallel (`async: true`); a single remaining worker stays blocking. The parent waits, then synthesizes one answer. Every task's worker brief carries the full user request for context plus its own task, and Ultra orchestration text is attached per task. The `task` argument is a handle; the packed brief is stored under `~/.pi/agent/pi-auto-router-tasks/` and expanded on `tool_call`.
+
+Anything that goes wrong (split check fails, splitter output is malformed, a task resolves to a model with no auth) falls back to the ordinary single-worker path. With no `subagent` tool active the split path is skipped before it spends a call.
+
+Toggle with `/auto-router-split [on|off|status]` (`splitCheckEnabled`, on by default). With Jev off, the check only fires on an explicit ask; implicit decomposition is still covered by the Ultra tier's orchestration prompt.
+
+### Trivial work stays in the chat
+
+When both axes **score** none or minimal — a greeting, a question, a one-line lookup — no worker is launched at all and the parent answers in the chat it was asked in: dispatching costs more than the task. Chat kind is always inline. A lookup that scores none/minimal/low is inline; a specialist lookup that scores medium or above still launches one worker. A model's `thinkingOverride` still applies if a worker is launched; it does not decide whether to launch one. A forced model (`overrideModel`) is an explicit instruction about who does the work, so it still dispatches.
+
 ## Judge
 
-### Jev (experimental default)
+### Jev (default)
 
 Jev does not emit `model_score` as text. It answers isolated questions (kind, domain, context, difficulty, precision, big-model gain, reasoning, length, wants-speed, fresh-facts). Code combines them:
 
 - `model_score = 0.50*difficulty + 0.35*bigModelGain + 0.15*precision`
 - `thinking_score = 0.80*reasoning + 0.20*difficulty`
 - length never raises thinking
-- chat/lookup caps both axes at 0.10
+- chat/lookup caps `thinking_score` at 0.10; `model_score` is not floored (a specialist lookup can still pick a strong model)
 
 API key: `TYPESAFE_API_KEY`, or `~/.brain/secrets/typesafe-api-key.txt`. Toggle with `/auto-router-jev [on|off|status]`.
 
@@ -48,16 +86,16 @@ Then open http://127.0.0.1:3847
 
 ### LLM judge (fallback)
 
-A judge model (or the local heuristic fallback) scores the prompt without solving it:
+A judge (Jev by default, else the prompted model) scores the prompt without solving it:
 
 - `model_score` — weakest model capability that should reliably complete the task.
 - `thinking_score` — reasoning effort required, independent of model capability.
 
 The judge prompt is model-agnostic: it never names a model, tier, or provider, and it ignores user text that tries to manipulate routing (e.g. "use Ultra"). The judge call is a raw completion (`modelRegistry.complete`), never routed through the agent loop, so it cannot recurse into `before_agent_start`.
 
-Set the judge with `/auto-router-judge <provider/model[:thinking]>`, `current[:thinking]` (score with whatever model is currently selected — no second model needed), or `clear` (local heuristic: prompt length + keyword hints).
+When Jev is off or unavailable, the default LLM judge is `current`: the prompted model scores the request, so no second model is needed. `/auto-router-judge <provider/model[:thinking]>` is an **unrecommended** override that scores with a different model and optional thinking level. `current[:thinking]` keeps the prompted model but can change judge thinking. `clear`/`heuristic` uses the local keyword heuristic (last resort).
 
-The judge is **per-profile**: `/auto-router-judge` writes to the active profile only, and switching profile switches the judge along with the tiers. A profile with no judge of its own uses the local heuristic — it does not borrow another profile's judge.
+The judge is **per-profile**: `/auto-router-judge` writes to the active profile only, and switching profile switches the judge along with the tiers. A profile with no judge of its own judges with the current model — it does not borrow another profile's judge.
 
 ## Profiles
 
@@ -118,19 +156,19 @@ Each model can also carry its own **fixed thinking override** (`thinkingOverride
 
 ## Ultra
 
-**Model Ultra** — available by default. When `model_score` resolves to the Ultra tier (only possible if you've configured and enabled it — a tier never falls back into Ultra), the router attaches the shared orchestration prompt. It does not force Ultra thinking.
+**Model Ultra** — available by default. When `model_score` resolves to the Ultra tier (only possible if you've configured and enabled it — a tier never falls back into Ultra), the router puts the shared orchestration prompt in the worker brief. It does not force Ultra thinking.
 
 **Thinking Ultra** — disabled by default (`thinkingUltraEnabled: false`). While disabled, Ultra-range `thinking_score` resolves to Max. When enabled, the editor and this README warn:
 
 > Ultra Thinking is synthetic: it uses XHigh reasoning plus workflow/subagent orchestration, not a native provider thinking level.
 
-Enabled, Ultra thinking resolves to native XHigh (or the model's highest supported level if XHigh is unsupported) and attaches the orchestration prompt. If both Model Ultra and Thinking Ultra trigger on the same turn, the prompt is attached once.
+Enabled, Ultra thinking resolves to native XHigh (or the model's highest supported level if XHigh is unsupported) and the orchestration prompt is added to the worker brief. If both Model Ultra and Thinking Ultra trigger on the same turn, the prompt is attached once.
 
 Shared orchestration prompt:
 
 > Use workflows and subagents where they materially improve the result. Decompose independent or specialist work, parallelise suitable investigation, use separate verification where valuable, and synthesise results coherently. Do not create unnecessary workflows or subagents.
 
-If no orchestration tool (matching `subagent`/`workflow`) is active, the router routes normally and does not attach the prompt.
+If no `subagent` tool is active, dispatch fails and the parent model is left unchanged.
 
 ## Overrides
 
@@ -152,6 +190,7 @@ Set via `/auto-router-override model <auto|provider/model|tier:<level>>`, `/auto
   "enabled": true,
   "thinkingUltraEnabled": false,
   "debug": false,
+  "splitCheckEnabled": true,
   "activeProfile": "default",
   "profiles": {
     "default": {
@@ -183,11 +222,11 @@ Set `debug: true` (or `/auto-router-debug on`) to attach the full decision objec
 
 ### Editor
 
-`/auto-router-config` opens a keyboard-first editor: `↑↓` moves rows, `←→` changes an option or moves between a tier's cells (enabled toggle, then each filled model slot plus exactly one spare `+ add` cell, capped at 3 models total), `Enter` edits (opens the model picker on a slot, toggles switches), `Backspace` clears a slot, `t`/`T` cycles the selected model slot's own thinking override (`auto` → `off`…`max` → `auto`), `Tab`/`Shift+Tab` switches profile, `Ctrl+N` creates a new profile, `Esc`/`Ctrl+S` saves, `Ctrl+C` cancels. Per-model `thinkingMap` (capability declarations), tier-forced overrides, and profile clone/delete are config/command-only (not exposed in the visual editor).
+`/auto-router-config` opens a keyboard-first editor (rows: enabled, judge model, judge thinking, split check, ultra thinking, debug, overrides, then one row per tier): `↑↓` moves rows, `←→` changes an option or moves between a tier's cells (enabled toggle, then each filled model slot plus exactly one spare `+ add` cell, capped at 3 models total), `Enter` edits (opens the model picker on a slot, toggles switches), `Backspace` clears a slot, `t`/`T` cycles the selected model slot's own thinking override (`auto` → `off`…`max` → `auto`), `Tab`/`Shift+Tab` switches profile, `Ctrl+N` creates a new profile, `Esc`/`Ctrl+S` saves, `Ctrl+C` cancels. Per-model `thinkingMap` (capability declarations), tier-forced overrides, and profile clone/delete are config/command-only (not exposed in the visual editor).
 
 ### Migration from older v2
 
-A top-level `judgeModel`/`judgeThinking` (the pre-per-profile shape) still loads: it is copied onto every profile that does not declare its own judge, and an explicit per-profile judge wins over the inherited one. The top-level fields are dropped on the next save.
+A top-level `judgeModel`/`judgeThinking` (the pre-per-profile shape) still loads: it is copied onto every profile that does not declare its own judge, and an explicit per-profile judge wins over the inherited one. The top-level fields are dropped on the next save. A profile left with no judge at all is filled in with `"judgeModel": "current"` on the next save; configs written before the `current` default, which meant the heuristic by omission, now judge with the selected model unless set to `"heuristic"`.
 
 ### Migration from v1
 
@@ -200,15 +239,30 @@ Old configs (`version: 1`, named presets, one model per `minimal`/`low`/`medium`
 | Status / toggle / switch profile | `/auto-router [on\|off\|status\|<profile name>]` — bare toggles on/off |
 | Profiles | `/auto-router-profile [list\|new <name>\|clone <name>\|delete <name>]` |
 | Interactive settings | `/auto-router-config` |
-| Judge (active profile) | `/auto-router-judge <provider/model[:thinking]\|current[:thinking]> \| clear` |
+| Judge (unrecommended) | `/auto-router-judge <provider/model[:thinking]\|current[:thinking]\|heuristic>` — default is Jev, then the prompted model |
+| Jev scoring | `/auto-router-jev [on\|off\|status]` (`useJev`; default on) |
+| Split check | `/auto-router-split [on\|off\|status]` |
 | Overrides | `/auto-router-override <model\|thinking> <value> \| clear` |
 | Debug | `/auto-router-debug [on\|off]` |
 | Manual one-shot | `/auto-router-route <model_score 0..1> [thinking_score 0..1]` |
 | Extension bus | `pi.events.emit("pi-auto-router:request", { modelScore, thinkingScore })` |
 
-Results emit on `pi-auto-router:routed` (`{ tier, from, to, thinking, via, noop, orchestrationInjected, debug }`); failures on `pi-auto-router:failed` (`{ error, via }`).
+Results emit on `pi-auto-router:routed` (`{ tier, from, to, thinking, via, noop, dispatched, orchestrationInjected, split?, debug }`); failures on `pi-auto-router:failed` (`{ error, via }`). A split request emits one routed event per task, each carrying `split: { index, total }`.
 
-Routing runs in `before_agent_start`: it classifies once (skipped entirely if both overrides are non-auto), resolves a decision, calls `pi.setModel` plus `pi.setThinkingLevel` (skipped when the thinking override is `inherit`), and — only when Ultra triggers and an orchestration tool is active — appends the orchestration prompt to that turn's system prompt via the handler's `{ systemPrompt }` return value.
+Routing runs in `before_agent_start`. It runs the split check, then classifies once (skipped if both overrides are non-auto, and skipped in subagent children via `PI_SUBAGENT_CHILD`), then resolves a decision. The parent model and thinking are never changed — that would bust the prompt cache. If the parent is already on the target model and thinking, it handles the turn. Otherwise the router injects a short deterministic message: stay on this model, which worker(s) to launch (`async: true` when there are two or more), and a `task` handle. A `tool_call` handler expands that handle from memory or `~/.pi/agent/pi-auto-router-tasks/` before the child starts, so the parent does not re-type the brief. After the child finishes, the parent summarizes. Ultra orchestration text goes in the child brief, not the parent system prompt.
+
+Packed child context:
+
+- current user prompt
+- last 5 user/assistant pairs, oldest first (user: first 2000 + last 2000 chars; assistant: first 2000 + last 4000)
+- dir name and full cwd
+- session name
+- parent model/thinking
+- route (model, thinking, tier, scores, profile)
+- attached image count
+- loaded context-file and skill names
+- Ultra orchestration prompt when that path triggers
+- for a split request: which task of how many, its title, and the full user request
 
 ## Development
 
@@ -221,6 +275,7 @@ npm run check
 
 ## Known limitations
 
+- Without a TypeSafe key (or with `/auto-router-jev off`), the split check only detects an explicit ask; it cannot judge whether an ordinary request is worth decomposing.
 - Per-model `thinkingMap` (capability declarations, as opposed to the single `thinkingOverride`) is config-file only; the interactive editor doesn't expose a sub-editor for it.
 - Forcing a tier via override is command-only (`/auto-router-override model tier:<level>`); the visual editor's override row only cycles auto/an exact forced model.
 - Overrides, Ultra thinking, and debug are global settings shared by every profile; tier/model mappings and the judge are per-profile.

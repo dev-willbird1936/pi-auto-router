@@ -1,15 +1,23 @@
 {
   "name": "pi-auto-router",
   "version": "0.1.0",
-  "description": "Scale-based auto router for Pi Coding Agent: judge prompt scale, route none/low/medium/high with intra-bucket float and switchable presets.",
+  "description": "Score-based auto router for Pi Coding Agent: judge prompt scale, route none through ultra with intra-band model pick and switchable profiles.",
   "author": "dev-willbird1936",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dev-willbird1936/pi-auto-router.git"
+  },
+  "homepage": "https://github.com/dev-willbird1936/pi-auto-router#readme",
+  "bugs": {
+    "url": "https://github.com/dev-willbird1936/pi-auto-router/issues"
+  },
   "keywords": ["pi-package", "pi-extension", "models", "router", "auto"],
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
-  "files": ["src", "web", "README.md", "LICENSE", "setup.bat", "launch.bat", "launch-jev.bat"],
+  "files": ["src", "web", "README.md", "LICENSE", "CHANGELOG.md", "setup.bat", "launch.bat", "launch-jev.bat"],
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",

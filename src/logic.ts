@@ -5,8 +5,11 @@ export function isPiThinking(value: string): value is PiThinking {
   return (PI_LEVELS as readonly string[]).includes(value);
 }
 
-/** Judge model sentinel: score with whatever model is currently selected. */
+/** Judge model sentinel: score with whatever model is currently selected. This is the default. */
 export const JUDGE_CURRENT = "current";
+
+/** Judge model sentinel: skip the LLM judge and score with the local heuristic. */
+export const JUDGE_HEURISTIC = "heuristic";
 
 // --- Canonical scale --------------------------------------------------------
 // Eight bands shared by both scoring axes (model capability and thinking
@@ -79,7 +82,7 @@ export interface TierConfig {
 /** A named, switchable set of tier mappings plus its own judge. Overrides and Ultra settings are global, not per-profile. */
 export interface RouterProfile {
   tiers: Partial<Record<CanonicalLevel, TierConfig>>;
-  /** "provider/model", the sentinel "current", or unset for the local heuristic. */
+  /** "provider/model", the sentinel "heuristic", or "current" (the default, also used when unset). */
   judgeModel?: string;
   /** "inherit" reuses the session thinking level. */
   judgeThinking?: PiThinking | "inherit";
@@ -238,6 +241,8 @@ export interface RouterConfig {
   thinkingUltraEnabled: boolean;
   /** Expose the debug decision object after each route. */
   debug: boolean;
+  /** Run the pre-judge split check, so a request worth several agents is judged and routed per task. */
+  splitCheckEnabled: boolean;
   /**
    * When true (default on this experimental branch, if a TypeSafe key is present),
    * Jev scores the prompt. Set false to keep the LLM/heuristic judge.
@@ -253,7 +258,7 @@ export interface RouterConfig {
 export function activeProfile(config: RouterConfig): RouterProfile {
   const existing = config.profiles[config.activeProfile];
   if (existing) return existing;
-  const fresh: RouterProfile = { tiers: {} };
+  const fresh: RouterProfile = { tiers: {}, judgeModel: JUDGE_CURRENT, judgeThinking: "high" };
   config.profiles[config.activeProfile] = fresh;
   return fresh;
 }
@@ -269,12 +274,23 @@ export function defaultConfig(): RouterConfig {
     enabled: false,
     thinkingUltraEnabled: false,
     debug: false,
+    splitCheckEnabled: true,
     useJev: true,
     activeProfile: DEFAULT_PROFILE_NAME,
-    profiles: { [DEFAULT_PROFILE_NAME]: { tiers: {} } },
+    profiles: { [DEFAULT_PROFILE_NAME]: { tiers: {}, judgeModel: JUDGE_CURRENT, judgeThinking: "high" } },
     overrideModel: { kind: "auto" },
     overrideThinking: { kind: "auto" },
   };
+}
+
+/** A stored judge ref, or undefined when the profile declares none (the caller supplies the default). */
+function normalizeJudgeModel(value: unknown): string | undefined {
+  const ref = typeof value === "string" ? value.trim() : "";
+  if (!ref) return undefined;
+  const lower = ref.toLowerCase();
+  if (lower === JUDGE_CURRENT) return JUDGE_CURRENT;
+  if (lower === JUDGE_HEURISTIC) return JUDGE_HEURISTIC;
+  return ref;
 }
 
 function normalizeJudgeThinking(value: unknown): PiThinking | "inherit" | undefined {
@@ -368,10 +384,10 @@ function normalizeProfiles(
     for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
       if (!name.trim()) continue;
       const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-      const own = typeof data.judgeModel === "string" && data.judgeModel ? data.judgeModel : undefined;
+      const own = normalizeJudgeModel(data.judgeModel);
       out[name] = {
         tiers: normalizeTiers(data.tiers),
-        judgeModel: own ?? fallback?.judgeModel,
+        judgeModel: own ?? fallback?.judgeModel ?? JUDGE_CURRENT,
         judgeThinking: own ? normalizeJudgeThinking(data.judgeThinking) : fallback?.judgeThinking,
       };
     }
@@ -383,12 +399,18 @@ function normalizeV2Config(data: Record<string, unknown>): RouterConfig {
   // Back-compat: the flat single-profile shape this extension briefly wrote to disk, and the
   // top-level judge fields that predate the per-profile judge.
   const legacyJudge = {
-    judgeModel: typeof data.judgeModel === "string" && data.judgeModel ? data.judgeModel : undefined,
+    judgeModel: normalizeJudgeModel(data.judgeModel),
     judgeThinking: normalizeJudgeThinking(data.judgeThinking),
   };
   const profiles = data.profiles
     ? normalizeProfiles(data.profiles, legacyJudge)
-    : { [DEFAULT_PROFILE_NAME]: { tiers: normalizeTiers(data.tiers), ...legacyJudge } };
+    : {
+        [DEFAULT_PROFILE_NAME]: {
+          tiers: normalizeTiers(data.tiers),
+          ...legacyJudge,
+          judgeModel: legacyJudge.judgeModel ?? JUDGE_CURRENT,
+        },
+      };
   const activeProfile =
     typeof data.activeProfile === "string" && profiles[data.activeProfile] ? data.activeProfile : Object.keys(profiles)[0];
   return {
@@ -396,9 +418,10 @@ function normalizeV2Config(data: Record<string, unknown>): RouterConfig {
     enabled: data.enabled !== false,
     thinkingUltraEnabled: data.thinkingUltraEnabled === true,
     debug: data.debug === true,
+    splitCheckEnabled: data.splitCheckEnabled !== false,
     useJev: data.useJev !== false,
     activeProfile: activeProfile ?? DEFAULT_PROFILE_NAME,
-    profiles: Object.keys(profiles).length > 0 ? profiles : { [DEFAULT_PROFILE_NAME]: { tiers: {} } },
+    profiles: Object.keys(profiles).length > 0 ? profiles : defaultConfig().profiles,
     overrideModel: normalizeModelOverride(data.overrideModel),
     overrideThinking: normalizeThinkingOverride(data.overrideThinking),
   };
@@ -466,7 +489,7 @@ function migrateLegacyPreset(preset: Record<string, unknown>): Partial<Record<Ca
 export function migrateV1Config(raw: LegacyConfigV1): RouterConfig {
   const fresh = defaultConfig();
   const presets = raw.presets ?? {};
-  const judgeModel = typeof raw.judgeModel === "string" && raw.judgeModel ? raw.judgeModel : undefined;
+  const judgeModel = normalizeJudgeModel(raw.judgeModel) ?? JUDGE_CURRENT;
   const judgeThinking = normalizeJudgeThinking(raw.judgeThinking);
   const profiles: Record<string, RouterProfile> = {};
   for (const [name, preset] of Object.entries(presets)) {
@@ -479,10 +502,7 @@ export function migrateV1Config(raw: LegacyConfigV1): RouterConfig {
     ...fresh,
     enabled: raw.enabled ?? fresh.enabled,
     activeProfile,
-    profiles:
-      Object.keys(profiles).length > 0
-        ? profiles
-        : { [DEFAULT_PROFILE_NAME]: { tiers: {}, judgeModel, judgeThinking } },
+    profiles: Object.keys(profiles).length > 0 ? profiles : { [DEFAULT_PROFILE_NAME]: { tiers: {}, judgeModel, judgeThinking } },
   };
 }
 

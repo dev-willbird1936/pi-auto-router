@@ -3,6 +3,7 @@ import {
   CANONICAL_LEVELS,
   DEFAULT_PROFILE_NAME,
   JUDGE_CURRENT,
+  JUDGE_HEURISTIC,
   PI_LEVELS,
   type CanonicalLevel,
   type ModelEntry,
@@ -39,6 +40,7 @@ const TOP_ROWS = [
   "enabled",
   "judgeModel",
   "judgeThinking",
+  "splitCheckEnabled",
   "thinkingUltraEnabled",
   "debug",
   "overrideModel",
@@ -154,7 +156,7 @@ class RouterEditor implements Component {
     this.theme = theme;
     this.config = cloneConfig(config);
     const judge = activeProfile(this.config).judgeModel;
-    this.pickedJudge = judge === JUDGE_CURRENT ? undefined : judge;
+    this.pickedJudge = judge === JUDGE_CURRENT || judge === JUDGE_HEURISTIC ? undefined : judge;
     this.pickedForcedModel = config.overrideModel.kind === "model" ? config.overrideModel.ref : undefined;
     this.done = done;
   }
@@ -235,6 +237,12 @@ class RouterEditor implements Component {
       frame(`${this.rowMarker("judgeModel")}Judge model: ${this.value(this.judgeModelLabel(), "judgeModel")}`),
       frame(`${this.rowMarker("judgeThinking")}Judge thinking: ${this.value(this.profile().judgeThinking ?? "high", "judgeThinking")}`),
       frame(
+        `${this.rowMarker("splitCheckEnabled")}Split check: ${this.value(
+          this.config.splitCheckEnabled ? "on (split a multi-task request across workers)" : "off",
+          "splitCheckEnabled",
+        )}`,
+      ),
+      frame(
         `${this.rowMarker("thinkingUltraEnabled")}Ultra thinking: ${this.value(
           this.config.thinkingUltraEnabled ? "on (synthetic xhigh + orchestration)" : "off (resolves to Max)",
           "thinkingUltraEnabled",
@@ -290,8 +298,8 @@ class RouterEditor implements Component {
 
   private judgeModelLabel(): string {
     const judge = this.profile().judgeModel;
-    if (!judge) return "heuristic";
-    return judge === JUDGE_CURRENT ? "current model" : judge;
+    if (judge === JUDGE_HEURISTIC) return "heuristic";
+    return !judge || judge === JUDGE_CURRENT ? "current model" : judge;
   }
 
   private overrideModelLabel(): string {
@@ -329,7 +337,7 @@ class RouterEditor implements Component {
         this.ctx.ui.notify(`Profile ${JSON.stringify(name)} already exists.`, "warning");
         return;
       }
-      this.config.profiles[name] = { tiers: {} };
+      this.config.profiles[name] = { tiers: {}, judgeModel: JUDGE_CURRENT, judgeThinking: "high" };
       this.config.activeProfile = name;
       this.selectedCell = 0;
       this.ctx.ui.notify(`Created and switched to profile ${name}.`, "info");
@@ -387,6 +395,9 @@ class RouterEditor implements Component {
       case "judgeThinking":
         this.profile().judgeThinking = this.cycleValue(JUDGE_THINKING_CHOICES, this.profile().judgeThinking ?? "high", direction);
         break;
+      case "splitCheckEnabled":
+        this.config.splitCheckEnabled = !this.config.splitCheckEnabled;
+        break;
       case "thinkingUltraEnabled":
         this.toggleUltraThinking();
         break;
@@ -416,15 +427,15 @@ class RouterEditor implements Component {
     }
   }
 
-  /** heuristic -> current model -> the picked model (when one is remembered). */
+  /** current model (the default) -> heuristic -> the picked model (when one is remembered). */
   private cycleJudgeModel(direction: -1 | 1): void {
-    const options: (string | undefined)[] = [undefined, JUDGE_CURRENT];
+    const options: string[] = [JUDGE_CURRENT, JUDGE_HEURISTIC];
     if (this.pickedJudge) options.push(this.pickedJudge);
     const profile = this.profile();
-    const index = options.indexOf(profile.judgeModel);
-    const next = options[(Math.max(0, index) + direction + options.length) % options.length];
+    const index = options.indexOf(profile.judgeModel ?? JUDGE_CURRENT);
+    const next = options[(Math.max(0, index) + direction + options.length) % options.length]!;
     profile.judgeModel = next;
-    if (next && !profile.judgeThinking) profile.judgeThinking = "high";
+    if (!profile.judgeThinking) profile.judgeThinking = "high";
   }
 
   /** auto -> the picked forced model (when one is remembered). Forced tiers are command-only (`/auto-router-override`). */
@@ -456,6 +467,10 @@ class RouterEditor implements Component {
         return;
       case "judgeThinking":
         this.changeOption(1);
+        return;
+      case "splitCheckEnabled":
+        this.config.splitCheckEnabled = !this.config.splitCheckEnabled;
+        this.tui.requestRender();
         return;
       case "thinkingUltraEnabled":
         this.toggleUltraThinking();
@@ -532,13 +547,13 @@ class RouterEditor implements Component {
     const profile = this.profile();
     const pick = await pickModel(
       this.ctx,
-      "Judge model (scores each prompt; ←→ for heuristic/current):",
-      "(clear → heuristic)",
-      profile.judgeModel === JUDGE_CURRENT ? undefined : profile.judgeModel,
+      "Unrecommended LLM judge (Jev is default; else the prompted model). ←→ current/heuristic:",
+      "(clear → heuristic last resort)",
+      profile.judgeModel === JUDGE_CURRENT || profile.judgeModel === JUDGE_HEURISTIC ? undefined : profile.judgeModel,
     );
     if (pick === undefined) return;
     if (pick === null) {
-      profile.judgeModel = undefined;
+      profile.judgeModel = JUDGE_HEURISTIC;
       this.ctx.ui.notify("Judge cleared; using local heuristic.", "info");
     } else {
       profile.judgeModel = pick;
@@ -566,8 +581,8 @@ class RouterEditor implements Component {
   private clearSelected(): void {
     const row = ROWS[this.selectedRow]!;
     if (row === "judgeModel") {
-      this.profile().judgeModel = undefined;
-      this.ctx.ui.notify("Judge cleared; using local heuristic.", "info");
+      this.profile().judgeModel = JUDGE_CURRENT;
+      this.ctx.ui.notify("Judge reset to the current model.", "info");
     } else if (row === "overrideModel") {
       this.config.overrideModel = { kind: "auto" };
     } else if (row === "overrideThinking") {

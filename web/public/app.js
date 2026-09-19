@@ -58,7 +58,6 @@ function renderRoute(data) {
       const thinking = model.thinking ? `:${model.thinking}` : "";
       return `<div class="model ${model.selected ? "selected" : ""}">
         <div>${model.ref}${thinking}</div>
-        <span class="tag ${model.tag}">${model.tag}</span>
         <span class="muted">$${model.costHint.toFixed(5)}</span>
         <span class="muted">${model.tier}</span>
       </div>`;

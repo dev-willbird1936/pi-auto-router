@@ -46,8 +46,6 @@ textarea { width: 100%; border: 0; resize: vertical; outline: none; }
 .bar > span { display: block; height: 100%; background: var(--bar); }
 .steps { margin: 0 0 12px 18px; color: var(--ink); }
 .models { display: flex; flex-direction: column; gap: 6px; }
-.model { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px; }
+.model { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px; }
 .model.selected { background: var(--ok); }
-.tag { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: #eee; }
-.tag.deep { background: #2f6bff; color: #fff; }
 @media (max-width: 980px) { main { grid-template-columns: 1fr; } }

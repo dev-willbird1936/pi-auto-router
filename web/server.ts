@@ -33,47 +33,56 @@ function mime(path: string): string {
   return "text/html; charset=utf-8";
 }
 
+async function handleConfig(): Promise<Response> {
+  const config = loadRouterConfig();
+  return json({
+    activeProfile: config.activeProfile,
+    profiles: Object.keys(config.profiles),
+    jev: typesafeConfigured(),
+    tiers: config.profiles[config.activeProfile]?.tiers ?? {},
+  });
+}
+
+async function handleRoute(request: Request): Promise<Response> {
+  if (!typesafeConfigured()) return json({ error: "TYPESAFE_API_KEY missing (expected env or ~/.brain/secrets/typesafe-api-key.txt)" }, 503);
+  const body = (await request.json()) as {
+    profile?: string;
+    prompt?: string;
+    history?: { role: "user" | "assistant"; text: string }[];
+  };
+  const prompt = body.prompt?.trim() ?? "";
+  if (!prompt) return json({ error: "prompt required" }, 400);
+  const config = loadRouterConfig();
+  if (body.profile && config.profiles[body.profile]) config.activeProfile = body.profile;
+  const classified = await classifyWithJev(prompt, body.history ?? []);
+  const board = buildRouteBoard(config, classified.scores, classified.read);
+  return json({
+    profile: config.activeProfile,
+    scores: classified.scores,
+    read: classified.read,
+    usage: classified.raw.usage,
+    steps: board.steps,
+    models: board.models,
+    decision: board.decision
+      ? {
+          ref: board.decision.model.ref,
+          thinking: board.decision.nativeThinking,
+          debug: board.decision.debug,
+        }
+      : null,
+  });
+}
+
 Bun.serve({
   port: PORT,
   async fetch(request) {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/api/config") {
-      const config = loadRouterConfig();
-      return json({
-        activeProfile: config.activeProfile,
-        profiles: Object.keys(config.profiles),
-        jev: typesafeConfigured(),
-        tiers: config.profiles[config.activeProfile]?.tiers ?? {},
-      });
-    }
-    if (request.method === "POST" && url.pathname === "/api/route") {
-      if (!typesafeConfigured()) return json({ error: "TYPESAFE_API_KEY missing (expected env or ~/.brain/secrets/typesafe-api-key.txt)" }, 503);
-      const body = (await request.json()) as {
-        profile?: string;
-        prompt?: string;
-        history?: { role: "user" | "assistant"; text: string }[];
-      };
-      const prompt = body.prompt?.trim() ?? "";
-      if (!prompt) return json({ error: "prompt required" }, 400);
-      const config = loadRouterConfig();
-      if (body.profile && config.profiles[body.profile]) config.activeProfile = body.profile;
-      const classified = await classifyWithJev(prompt, body.history ?? []);
-      const board = buildRouteBoard(config, classified.scores, classified.read);
-      return json({
-        profile: config.activeProfile,
-        scores: classified.scores,
-        read: classified.read,
-        usage: classified.raw.usage,
-        steps: board.steps,
-        models: board.models,
-        decision: board.decision
-          ? {
-              ref: board.decision.model.ref,
-              thinking: board.decision.nativeThinking,
-              debug: board.decision.debug,
-            }
-          : null,
-      });
+    try {
+      if (request.method === "GET" && url.pathname === "/api/config") return await handleConfig();
+      if (request.method === "POST" && url.pathname === "/api/route") return await handleRoute(request);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ error: message }, 502);
     }
     const path = url.pathname === "/" ? join(PUBLIC, "index.html") : join(PUBLIC, url.pathname.replace(/^\/+/, ""));
     if (!path.startsWith(PUBLIC) || !existsSync(path)) return new Response("Not found", { status: 404 });

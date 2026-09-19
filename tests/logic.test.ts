@@ -7,7 +7,10 @@ import {
   canonicalLevelForScore,
   CANONICAL_BANDS,
   CANONICAL_LEVELS,
+  defaultConfig,
   fuzzyFilterModels,
+  JUDGE_CURRENT,
+  JUDGE_HEURISTIC,
   heuristicScores,
   migrateV1Config,
   modelIndexForPosition,
@@ -343,7 +346,8 @@ test("each profile carries its own judge, and switching profile switches judge",
     profiles: {
       cheap: { judgeModel: "p/small", judgeThinking: "low", tiers: {} },
       power: { judgeModel: "p/big", judgeThinking: "xhigh", tiers: {} },
-      heuristic: { tiers: {} },
+      unset: { tiers: {} },
+      heuristic: { judgeModel: "heuristic", tiers: {} },
     },
   });
   expect(activeProfile(config).judgeModel).toBe("p/small");
@@ -351,9 +355,17 @@ test("each profile carries its own judge, and switching profile switches judge",
   config.activeProfile = "power";
   expect(activeProfile(config).judgeModel).toBe("p/big");
   expect(activeProfile(config).judgeThinking).toBe("xhigh");
-  // A profile with no judge of its own falls back to the local heuristic, not to another profile's judge.
+  // A profile with no judge of its own defaults to the current model, not to another profile's judge.
+  config.activeProfile = "unset";
+  expect(activeProfile(config).judgeModel).toBe(JUDGE_CURRENT);
+  // The local heuristic stays selectable, but only explicitly.
   config.activeProfile = "heuristic";
-  expect(activeProfile(config).judgeModel).toBeUndefined();
+  expect(activeProfile(config).judgeModel).toBe(JUDGE_HEURISTIC);
+});
+
+test("a fresh config judges with the current model", () => {
+  expect(activeProfile(defaultConfig()).judgeModel).toBe(JUDGE_CURRENT);
+  expect(activeProfile(normalizeConfig({})).judgeModel).toBe(JUDGE_CURRENT);
 });
 
 test("a pre-per-profile top-level judge migrates onto every profile that lacks its own", () => {

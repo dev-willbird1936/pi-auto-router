@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { defaultConfig, type RouterConfig, type RouterProfile, type TierConfig } from "../src/logic.ts";
-import { buildRouteDecision, resolveOrchestration } from "../src/router.ts";
+import { answerInline, buildRouteDecision, keepWithParent, resolveOrchestration } from "../src/router.ts";
 
 function tier(...refs: string[]): TierConfig {
   return { enabled: true, models: refs.map(ref => ({ ref })) };
@@ -82,6 +82,47 @@ test("orchestration does not fire for ordinary routes", () => {
   const cfg = config({ tiers: { medium: tier("p/a") } });
   const decision = buildRouteDecision(cfg, { modelScore: 0.3, thinkingScore: 0.3 })!;
   expect(resolveOrchestration(decision, true)).toEqual({ requested: false, available: true });
+});
+
+test("none/minimal work is answered inline; anything above it dispatches", () => {
+  const cfg = config({ tiers: { minimal: tier("p/min"), medium: tier("p/a") } });
+  expect(answerInline(buildRouteDecision(cfg, { modelScore: 0.01, thinkingScore: 0.01 })!)).toBe(true);
+  expect(answerInline(buildRouteDecision(cfg, { modelScore: 0.08, thinkingScore: 0.08 })!)).toBe(true);
+  expect(answerInline(buildRouteDecision(cfg, { modelScore: 0.3, thinkingScore: 0.01 })!)).toBe(false);
+  expect(answerInline(buildRouteDecision(cfg, { modelScore: 0.01, thinkingScore: 0.3 })!)).toBe(false);
+});
+
+test("a forced model still dispatches, however trivial the request scored", () => {
+  const cfg = config({ tiers: { minimal: tier("p/min") }, overrideModel: { kind: "model", ref: "z/forced" } });
+  expect(answerInline(buildRouteDecision(cfg, { modelScore: 0.01, thinkingScore: 0.01 })!)).toBe(false);
+});
+
+test("chat and cheap lookups stay inline; a specialist lookup still dispatches", () => {
+  const cfg = config({ tiers: { none: tier("p/min"), low: tier("p/low"), medium: tier("p/a") } });
+  const cheap = buildRouteDecision(cfg, { modelScore: 0.18, thinkingScore: 0.1 })!;
+  expect(answerInline(cheap)).toBe(false);
+  expect(answerInline(cheap, "chat")).toBe(true);
+  expect(answerInline(cheap, "lookup")).toBe(true);
+  const quiz = buildRouteDecision(cfg, { modelScore: 0.28, thinkingScore: 0.1 })!;
+  expect(answerInline(quiz, "lookup")).toBe(false);
+});
+
+test("keepWithParent holds chat/lookup pieces of a split even when they score above none", () => {
+  const cfg = config({ tiers: { medium: tier("p/a") } });
+  const dosing = buildRouteDecision(cfg, { modelScore: 0.39, thinkingScore: 0.37 })!;
+  expect(answerInline(dosing, "lookup")).toBe(false);
+  expect(keepWithParent(dosing, "lookup")).toBe(true);
+  expect(keepWithParent(dosing, "task")).toBe(false);
+});
+
+test("a model's thinkingOverride does not launch a worker for none/minimal scores", () => {
+  const cfg = config({
+    tiers: { none: { enabled: true, models: [{ ref: "claude-bridge/haiku", thinkingOverride: "high" }] } },
+  });
+  const decision = buildRouteDecision(cfg, { modelScore: 0.01, thinkingScore: 0.01 })!;
+  expect(decision.nativeThinking).toBe("high");
+  expect(decision.debug.canonical_thinking_level).toBe("high");
+  expect(answerInline(decision)).toBe(true);
 });
 
 // --- Overrides ------------------------------------------------------------------

@@ -1,4 +1,6 @@
 node_modules/
+.pi/
+.serena/
 web/.cache/
 *.log
 .env

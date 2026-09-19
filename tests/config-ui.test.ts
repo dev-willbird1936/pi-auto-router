@@ -84,18 +84,19 @@ const ROW = {
   enabled: 0,
   judgeModel: 1,
   judgeThinking: 2,
-  thinkingUltraEnabled: 3,
-  debug: 4,
-  overrideModel: 5,
-  overrideThinking: 6,
-  none: 7,
-  minimal: 8,
-  low: 9,
-  medium: 10,
-  high: 11,
-  xhigh: 12,
-  max: 13,
-  ultra: 14,
+  splitCheckEnabled: 3,
+  thinkingUltraEnabled: 4,
+  debug: 5,
+  overrideModel: 6,
+  overrideThinking: 7,
+  none: 8,
+  minimal: 9,
+  low: 10,
+  medium: 11,
+  high: 12,
+  xhigh: 13,
+  max: 14,
+  ultra: 15,
 };
 
 test("Esc saves without changes", async () => {
@@ -126,16 +127,26 @@ test("enabled toggles with Left/Right or Enter", async () => {
   expect(t.config.enabled).toBe(false);
 });
 
-test("judge model cycles heuristic -> current -> picked, and Enter opens the picker", async () => {
+test("judge model cycles current -> heuristic -> picked, and Enter opens the picker", async () => {
   const t = setup(base(), ["p/a"]);
   const pending = runConfigUI(t.ctx, t.hooks);
   down(t.editor(), ROW.judgeModel);
-  t.editor().handleInput("\x1b[C"); // heuristic -> current
+  t.editor().handleInput("\x1b[C"); // current (the default) -> heuristic
   t.editor().handleInput("\n"); // Enter opens picker (overrides cycle position)
   await t.tick();
   t.editor().handleInput("\x1b");
   await pending;
   expect(t.config.profiles[t.config.activeProfile]?.judgeModel).toBe("p/a");
+});
+
+test("an unset judge starts on the default (current model) and cycles to the heuristic", async () => {
+  const t = setup(base());
+  const pending = runConfigUI(t.ctx, t.hooks);
+  down(t.editor(), ROW.judgeModel);
+  t.editor().handleInput("\x1b[C");
+  t.editor().handleInput("\x1b");
+  await pending;
+  expect(t.config.profiles[t.config.activeProfile]?.judgeModel).toBe("heuristic");
 });
 
 test("thinking Ultra toggle warns once when turned on", async () => {
@@ -147,6 +158,17 @@ test("thinking Ultra toggle warns once when turned on", async () => {
   await pending;
   expect(t.config.thinkingUltraEnabled).toBe(true);
   expect(t.notifications.some(n => n.includes("synthetic"))).toBe(true);
+});
+
+test("split check toggles without warning", async () => {
+  const t = setup(base());
+  const pending = runConfigUI(t.ctx, t.hooks);
+  down(t.editor(), ROW.splitCheckEnabled);
+  t.editor().handleInput("\n");
+  t.editor().handleInput("\x1b");
+  await pending;
+  expect(t.config.splitCheckEnabled).toBe(false);
+  expect(t.notifications.some(n => n.includes("synthetic"))).toBe(false);
 });
 
 test("debug toggles independently of thinking Ultra", async () => {

@@ -17,6 +17,7 @@ import {
   heuristicScores,
   isPiThinking,
   JUDGE_CURRENT,
+  JUDGE_HEURISTIC,
   normalizeConfig,
   parseJudgeScores,
   ULTRA_THINKING_WARNING,
@@ -27,8 +28,28 @@ import {
   type Scores,
   type ThinkingOverride,
 } from "./logic.ts";
-import { buildRouteDecision, resolveOrchestration, type RouteDebug, type RouteDecision } from "./router.ts";
+import { answerInline, buildRouteDecision, resolveOrchestration, type RouteDebug, type RouteDecision } from "./router.ts";
 import { classifyWithJev, typesafeConfigured, type ConversationTurn } from "./jev.ts";
+import {
+  buildParentDispatch,
+  buildSplitDispatch,
+  configureTaskStore,
+  partitionRoutedTasks,
+  resolveWorkerTask,
+  resourceNames,
+  shouldDispatch,
+  type RoutedSubTask,
+} from "./dispatch.ts";
+import {
+  buildSplitSystemPrompt,
+  buildSplitUserPrompt,
+  checkSplitWithJev,
+  heuristicSplitCheck,
+  parseSubTasks,
+  splitLocally,
+  wantsSplit,
+  type SubTask,
+} from "./split.ts";
 import { runConfigUI, type ConfigCommandCtx, type StatusCtx } from "./config-ui.ts";
 
 export const REQUEST_CHANNEL = "pi-auto-router:request";
@@ -37,6 +58,7 @@ export const FAILED_CHANNEL = "pi-auto-router:failed";
 
 const CONFIG_FILE = "pi-auto-router.json";
 const JUDGE_TIMEOUT_MS = 15_000;
+const SPLIT_TIMEOUT_MS = 30_000;
 const ORCHESTRATION_TOOL_PATTERN = /subagent|workflow/i;
 
 export interface RoutedPayload {
@@ -46,7 +68,10 @@ export interface RoutedPayload {
   thinking: PiThinking | undefined;
   via: "auto" | "command" | "bus";
   noop: boolean;
+  dispatched: boolean;
   orchestrationInjected: boolean;
+  /** Set when this route is one task of a split request. */
+  split?: { index: number; total: number };
   debug: RouteDebug;
 }
 
@@ -120,7 +145,7 @@ function findModel(ctx: ExtensionContext, ref: string): Model<any> | undefined {
   return ctx.modelRegistry.find(ref.slice(0, slash), ref.slice(slash + 1));
 }
 
-function sessionHistory(ctx: ExtensionContext): ConversationTurn[] {
+function sessionTurns(ctx: ExtensionContext): ConversationTurn[] {
   const entries = (ctx.sessionManager as { getEntries?: () => unknown[] } | undefined)?.getEntries?.() ?? [];
   const turns: ConversationTurn[] = [];
   for (const raw of entries) {
@@ -139,7 +164,15 @@ function sessionHistory(ctx: ExtensionContext): ConversationTurn[] {
     }
     if (text.trim()) turns.push({ role, text });
   }
-  return turns.slice(-8);
+  return turns;
+}
+
+function sessionHistory(ctx: ExtensionContext): ConversationTurn[] {
+  return sessionTurns(ctx).slice(-8);
+}
+
+function inSubagentChild(): boolean {
+  return process.env.PI_SUBAGENT_CHILD === "1";
 }
 
 export default function piAutoRouterExtension(pi: ExtensionAPI): void {
@@ -149,12 +182,18 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
   /** Defensive: the judge call must never re-enter before_agent_start (it bypasses the agent loop already, but guard anyway). */
   let judging = false;
 
-  function judgeLabel(): string {
-    if (config.useJev) return typesafeConfigured() ? "jev-latest" : "jev (no API key)";
+  function llmJudgeLabel(): string {
     const { judgeModel, judgeThinking } = activeProfile(config);
-    if (!judgeModel) return "heuristic";
-    const name = judgeModel === JUDGE_CURRENT ? "current model" : judgeModel;
+    if (judgeModel === JUDGE_HEURISTIC) return "heuristic";
+    const name = !judgeModel || judgeModel === JUDGE_CURRENT ? "current model" : judgeModel;
     return `${name}:${judgeThinking ?? "high"}`;
+  }
+
+  function judgeLabel(): string {
+    if (config.useJev) {
+      return typesafeConfigured() ? "jev-latest" : `jev (no key) → ${llmJudgeLabel()}`;
+    }
+    return llmJudgeLabel();
   }
 
   function overrideLabel(): string {
@@ -178,7 +217,7 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
     const otherProfiles = Object.keys(config.profiles).filter(name => name !== config.activeProfile);
     const lines = [
       `Auto-router: ${config.enabled ? "on" : "off"}  profile: ${config.activeProfile}${otherProfiles.length ? ` (also: ${otherProfiles.join(", ")})` : ""}`,
-      `Judge: ${judgeLabel()}  ultra-thinking: ${config.thinkingUltraEnabled ? "on" : "off"}`,
+      `Judge: ${judgeLabel()}  ultra-thinking: ${config.thinkingUltraEnabled ? "on" : "off"}  split-check: ${config.splitCheckEnabled ? "on" : "off"}`,
       `Current: ${current} [${pi.getThinkingLevel()}]`,
       `Overrides: ${overrideLabel()}`,
       `Last: ${last}`,
@@ -205,43 +244,20 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
     return pi.getActiveTools().some(name => ORCHESTRATION_TOOL_PATTERN.test(name));
   }
 
-  async function applyDecision(
+  function subagentAvailable(): boolean {
+    return pi.getActiveTools().some(name => /subagent/i.test(name));
+  }
+
+  function recordRoute(
     ctx: ExtensionContext,
     decision: RouteDecision,
     via: RoutedPayload["via"],
-  ): Promise<{ switched: boolean; message: string; systemPromptAddition?: string }> {
-    const target = findModel(ctx, decision.model.ref);
-    if (!target) {
-      const error = `unknown model ${decision.model.ref}`;
-      pi.events.emit(FAILED_CHANNEL, { error, via } satisfies FailedPayload);
-      return { switched: false, message: `pi-auto-router: ${error}.` };
-    }
-    if (!hasAuth(ctx, target)) {
-      const error = `no auth for ${decision.model.ref}`;
-      pi.events.emit(FAILED_CHANNEL, { error, via } satisfies FailedPayload);
-      return { switched: false, message: `pi-auto-router: ${error}; sign in first.` };
-    }
-
-    const orchestration = resolveOrchestration(decision, orchestrationAvailable());
-    const from = modelRef(ctx.model);
-    const noop = from === decision.model.ref && (decision.nativeThinking === undefined || pi.getThinkingLevel() === decision.nativeThinking);
-
-    if (!noop) {
-      let ok = false;
-      try {
-        ok = await pi.setModel(target);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        pi.events.emit(FAILED_CHANNEL, { error: detail, via } satisfies FailedPayload);
-        return { switched: false, message: `pi-auto-router: switch to ${decision.model.ref} failed: ${detail}.` };
-      }
-      if (!ok) {
-        pi.events.emit(FAILED_CHANNEL, { error: "no auth", via } satisfies FailedPayload);
-        return { switched: false, message: `pi-auto-router: no auth for ${decision.model.ref}; sign in first.` };
-      }
-      if (decision.nativeThinking) pi.setThinkingLevel(decision.nativeThinking);
-    }
-
+    from: string | undefined,
+    noop: boolean,
+    dispatched: boolean,
+    orchestrationInjected: boolean,
+    split?: { index: number; total: number },
+  ): RoutedPayload {
     const payload: RoutedPayload = {
       tier: decision.debug.resolved_model_level,
       from,
@@ -249,45 +265,119 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
       thinking: decision.nativeThinking,
       via,
       noop,
-      orchestrationInjected: !!orchestration.prompt,
+      dispatched,
+      orchestrationInjected,
+      ...(split ? { split } : {}),
       debug: decision.debug,
     };
     lastRoute = { ...payload, at: Date.now() };
     pi.events.emit(ROUTED_CHANNEL, payload);
     updateStatus(ctx);
     if (config.debug && ctx.hasUI) ctx.ui.notify(`pi-auto-router debug: ${JSON.stringify(decision.debug)}`, "info");
-    const message = noop
-      ? `pi-auto-router: already on ${decision.model.ref}:${decision.nativeThinking ?? "inherit"}.`
-      : `pi-auto-router: ${decision.debug.canonical_model_level} -> ${decision.debug.resolved_model_level} (${from ?? "none"} -> ${decision.model.ref}:${decision.nativeThinking ?? "inherit"}).`;
-    return { switched: true, message, systemPromptAddition: orchestration.prompt };
+    return payload;
+  }
+
+  async function applyDecision(
+    ctx: ExtensionContext,
+    decision: RouteDecision,
+    via: RoutedPayload["via"],
+    launch?: { prompt: string; imageCount: number; contextFiles: string[]; skills: string[]; kind?: string },
+  ): Promise<{ ok: boolean; dispatched: boolean; message: string; parentDispatch?: string }> {
+    const target = findModel(ctx, decision.model.ref);
+    if (!target) {
+      const error = `unknown model ${decision.model.ref}`;
+      pi.events.emit(FAILED_CHANNEL, { error, via } satisfies FailedPayload);
+      return { ok: false, dispatched: false, message: `pi-auto-router: ${error}.` };
+    }
+    if (!hasAuth(ctx, target)) {
+      const error = `no auth for ${decision.model.ref}`;
+      pi.events.emit(FAILED_CHANNEL, { error, via } satisfies FailedPayload);
+      return { ok: false, dispatched: false, message: `pi-auto-router: ${error}; sign in first.` };
+    }
+
+    const from = modelRef(ctx.model);
+    const noop = !shouldDispatch(from, decision, pi.getThinkingLevel());
+    const orchestration = resolveOrchestration(decision, orchestrationAvailable());
+
+    if (!launch) {
+      recordRoute(ctx, decision, via, from, noop, false, false);
+      return {
+        ok: true,
+        dispatched: false,
+        message: `pi-auto-router: ${decision.debug.canonical_model_level} -> ${decision.debug.resolved_model_level} (${from ?? "none"} stays, target ${decision.model.ref}:${decision.nativeThinking ?? "inherit"}).`,
+      };
+    }
+
+    if (answerInline(decision, launch?.kind)) {
+      recordRoute(ctx, decision, via, from, true, false, false);
+      return {
+        ok: true,
+        dispatched: false,
+        message: `pi-auto-router: ${decision.debug.canonical_model_level} work; ${from ?? "the parent"} answers in chat, no worker launched.`,
+      };
+    }
+
+    if (noop) {
+      recordRoute(ctx, decision, via, from, true, false, false);
+      return {
+        ok: true,
+        dispatched: false,
+        message: `pi-auto-router: already on ${decision.model.ref}:${decision.nativeThinking ?? "inherit"}; parent handles this turn.`,
+      };
+    }
+
+    if (!subagentAvailable()) {
+      const error = "subagent tool is not active";
+      pi.events.emit(FAILED_CHANNEL, { error, via } satisfies FailedPayload);
+      return { ok: false, dispatched: false, message: `pi-auto-router: ${error}; parent model left unchanged.` };
+    }
+
+    const parentDispatch = buildParentDispatch(decision, {
+      cwd: ctx.cwd,
+      sessionName: pi.getSessionName?.(),
+      parentModel: from,
+      parentThinking: pi.getThinkingLevel(),
+      profile: config.activeProfile,
+      prompt: launch.prompt,
+      imageCount: launch.imageCount,
+      contextFiles: launch.contextFiles,
+      skills: launch.skills,
+      history: sessionTurns(ctx),
+      orchestration: orchestration.prompt,
+    });
+    recordRoute(ctx, decision, via, from, false, true, !!orchestration.prompt);
+    return {
+      ok: true,
+      dispatched: true,
+      message: `pi-auto-router: dispatch ${from ?? "none"} stays -> worker ${decision.model.ref}:${decision.nativeThinking ?? "inherit"}.`,
+      parentDispatch,
+    };
   }
 
   function findJudge(ctx: ExtensionContext): Model<any> | undefined {
     const { judgeModel } = activeProfile(config);
-    if (!judgeModel) return undefined;
-    if (judgeModel === JUDGE_CURRENT) return ctx.model;
+    if (judgeModel === JUDGE_HEURISTIC) return undefined;
+    // Unset means the default: score with whatever model is currently selected.
+    if (!judgeModel || judgeModel === JUDGE_CURRENT) return ctx.model;
     return findModel(ctx, judgeModel);
   }
 
-  /** Stage 1 (Judge): Jev when enabled, else a raw completion, never routed through the agent loop. */
-  async function classify(prompt: string, ctx: ExtensionContext): Promise<Scores> {
-    const fallback = heuristicScores(prompt);
-    if (config.useJev) {
-      if (!typesafeConfigured()) return fallback;
-      try {
-        const result = await classifyWithJev(prompt, sessionHistory(ctx), {
-          signal: ctx.signal,
-          timeoutMs: JUDGE_TIMEOUT_MS,
-        });
-        return result.scores;
-      } catch {
-        return fallback;
-      }
-    }
-    const judge = findJudge(ctx);
-    if (!judge || !hasAuth(ctx, judge)) return fallback;
+  function judgeEffort(): PiThinking {
     const configured = activeProfile(config).judgeThinking;
-    const judgeThinking = configured === "inherit" ? pi.getThinkingLevel() : configured ?? "high";
+    return configured === "inherit" ? (pi.getThinkingLevel() as PiThinking) : configured ?? "high";
+  }
+
+  function completionText(response: { content: { type: string }[] }): string {
+    return response.content
+      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+      .map(part => part.text)
+      .join("\n");
+  }
+
+  /** Stage 1 (Judge): Jev by default; otherwise the prompted model (or an explicit judge). */
+  async function classifyWithLlm(prompt: string, ctx: ExtensionContext): Promise<{ scores: Scores } | undefined> {
+    const judge = findJudge(ctx);
+    if (!judge || !hasAuth(ctx, judge)) return undefined;
     try {
       const signal = ctx.signal ?? AbortSignal.timeout(JUDGE_TIMEOUT_MS);
       const response = await ctx.modelRegistry.complete(
@@ -298,23 +388,149 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
             { role: "user", content: [{ type: "text", text: buildJudgeUserPrompt(prompt) }], timestamp: Date.now() },
           ],
         },
-        { signal, reasoningEffort: judgeThinking, cacheRetention: "none" } as Parameters<
+        { signal, reasoningEffort: judgeEffort(), cacheRetention: "none" } as Parameters<
           ExtensionContext["modelRegistry"]["complete"]
         >[2],
       );
-      const text = response.content
-        .filter((part): part is { type: "text"; text: string } => part.type === "text")
-        .map(part => part.text)
-        .join("\n");
-      return parseJudgeScores(text) ?? fallback;
+      const scores = parseJudgeScores(completionText(response));
+      return scores ? { scores } : undefined;
     } catch {
-      return fallback;
+      return undefined;
     }
+  }
+
+  async function classify(prompt: string, ctx: ExtensionContext): Promise<{ scores: Scores; kind?: string }> {
+    const heuristic = { scores: heuristicScores(prompt) as Scores };
+    if (activeProfile(config).judgeModel === JUDGE_HEURISTIC) return heuristic;
+    if (config.useJev && typesafeConfigured()) {
+      try {
+        const result = await classifyWithJev(prompt, sessionHistory(ctx), {
+          signal: ctx.signal,
+          timeoutMs: JUDGE_TIMEOUT_MS,
+        });
+        return { scores: result.scores, kind: result.read.kind };
+      } catch {
+        // Missing/failed Jev: the prompted agent (or explicit judge) decides.
+      }
+    }
+    return (await classifyWithLlm(prompt, ctx)) ?? heuristic;
+  }
+
+  /** Stage 0 (Split check): runs before the judge, so the judge can score each task on its own. */
+  async function checkSplit(prompt: string, ctx: ExtensionContext): Promise<boolean> {
+    const local = heuristicSplitCheck(prompt);
+    if (!config.useJev || !typesafeConfigured()) return wantsSplit(local);
+    try {
+      return wantsSplit(
+        await checkSplitWithJev(prompt, sessionHistory(ctx), { signal: ctx.signal, timeoutMs: JUDGE_TIMEOUT_MS }),
+      );
+    } catch {
+      return wantsSplit(local);
+    }
+  }
+
+  /**
+   * Stage 0b (Splitter): local task list first, then the judge model if that
+   * did not find two pieces (the current model when the profile judges with
+   * `current` or the heuristic). Fewer than two tasks means "not split".
+   */
+  async function splitTasks(prompt: string, ctx: ExtensionContext): Promise<SubTask[]> {
+    const local = splitLocally(prompt);
+    if (local.length >= 2) return local;
+    const splitter = findJudge(ctx) ?? ctx.model;
+    if (!splitter || !hasAuth(ctx, splitter)) return [];
+    try {
+      const signal = ctx.signal ?? AbortSignal.timeout(SPLIT_TIMEOUT_MS);
+      const response = await ctx.modelRegistry.complete(
+        splitter,
+        {
+          systemPrompt: buildSplitSystemPrompt(),
+          messages: [
+            { role: "user", content: [{ type: "text", text: buildSplitUserPrompt(prompt) }], timestamp: Date.now() },
+          ],
+        },
+        { signal, reasoningEffort: judgeEffort(), cacheRetention: "none" } as Parameters<
+          ExtensionContext["modelRegistry"]["complete"]
+        >[2],
+      );
+      return parseSubTasks(completionText(response));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Split path: check, split, judge each task. Cheap chat/lookup pieces stay with
+   * the parent; the rest get workers. Undefined means this is not a split (or the
+   * split is not dispatchable) and the caller should route the whole prompt as one task.
+   * Empty string means every piece stayed with the parent: no worker, no extra classify.
+   */
+  async function routeSplit(
+    ctx: ExtensionContext,
+    launch: { prompt: string; imageCount: number; contextFiles: string[]; skills: string[] },
+  ): Promise<string | undefined> {
+    // No worker tool means no split to dispatch; the single path reports that failure.
+    if (!subagentAvailable() || !(await checkSplit(launch.prompt, ctx))) return undefined;
+    const tasks = await splitTasks(launch.prompt, ctx);
+    if (tasks.length < 2) return undefined;
+
+    const toolsAvailable = orchestrationAvailable();
+    const routed: RoutedSubTask[] = [];
+    for (const task of tasks) {
+      const classified = await classify(task.prompt, ctx);
+      const decision = buildRouteDecision(config, classified.scores);
+      if (!decision) return undefined;
+      const target = findModel(ctx, decision.model.ref);
+      if (!target || !hasAuth(ctx, target)) {
+        const error = target ? `no auth for ${decision.model.ref}` : `unknown model ${decision.model.ref}`;
+        pi.events.emit(FAILED_CHANNEL, { error, via: "auto" } satisfies FailedPayload);
+        return undefined;
+      }
+      routed.push({
+        task,
+        decision,
+        kind: classified.kind,
+        orchestration: resolveOrchestration(decision, toolsAvailable).prompt,
+      });
+    }
+
+    const { inline, workers } = partitionRoutedTasks(routed);
+    if (workers.length === 0) return "";
+    if (workers.length === 1 && inline.length === 0) return undefined;
+
+    const from = modelRef(ctx.model);
+    const dispatch = buildSplitDispatch(
+      workers,
+      {
+        cwd: ctx.cwd,
+        sessionName: pi.getSessionName?.(),
+        parentModel: from,
+        parentThinking: pi.getThinkingLevel(),
+        profile: config.activeProfile,
+        prompt: launch.prompt,
+        imageCount: launch.imageCount,
+        contextFiles: launch.contextFiles,
+        skills: launch.skills,
+        history: sessionTurns(ctx),
+      },
+      inline,
+    );
+    workers.forEach((entry, index) => {
+      recordRoute(ctx, entry.decision, "auto", from, false, true, !!entry.orchestration, {
+        index: index + 1,
+        total: workers.length,
+      });
+    });
+    for (const entry of inline) {
+      recordRoute(ctx, entry.decision, "auto", from, true, false, false);
+    }
+    return dispatch;
   }
 
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
     config = loadConfig();
+    configureTaskStore(join(getAgentDir(), "pi-auto-router-tasks"));
     updateStatus(ctx);
   });
 
@@ -346,22 +562,43 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
     })();
   });
 
+  pi.on("tool_call", event => {
+    if (event.toolName !== "subagent") return;
+    const input = event.input as Record<string, unknown>;
+    const task = input.task;
+    if (typeof task !== "string") return;
+    const resolved = resolveWorkerTask(task);
+    if (resolved !== task) input.task = resolved;
+  });
+
   pi.on("before_agent_start", async (event, ctx) => {
     latestCtx = ctx;
-    if (!config.enabled || judging) return;
+    if (!config.enabled || judging || inSubagentChild()) return;
     const prompt = typeof event.prompt === "string" ? event.prompt : "";
     if (!prompt.trim()) return;
     judging = true;
     try {
+      const launch = {
+        prompt,
+        imageCount: event.images?.length ?? 0,
+        contextFiles: resourceNames(event.systemPromptOptions?.contextFiles),
+        skills: resourceNames(event.systemPromptOptions?.skills),
+      };
+      const split = config.splitCheckEnabled ? await routeSplit(ctx, launch) : undefined;
+      if (split) return { message: { customType: "pi-auto-router", content: split, display: true } };
+      if (split === "") return;
       const needModelScore = config.overrideModel.kind !== "model";
       const needThinkingScore = config.overrideThinking.kind === "auto";
-      const scores = needModelScore || needThinkingScore ? await classify(prompt, ctx) : { modelScore: 0, thinkingScore: 0 };
-      const decision = buildRouteDecision(config, scores);
+      const classified =
+        needModelScore || needThinkingScore ? await classify(prompt, ctx) : { scores: { modelScore: 0, thinkingScore: 0 } };
+      const decision = buildRouteDecision(config, classified.scores);
       if (!decision) return;
-      const result = await applyDecision(ctx, decision, "auto");
-      if (!result.switched && ctx.hasUI) ctx.ui.notify(result.message, "warning");
-      if (result.systemPromptAddition) {
-        return { systemPrompt: `${event.systemPrompt}\n\n${result.systemPromptAddition}` };
+      const result = await applyDecision(ctx, decision, "auto", { ...launch, kind: classified.kind });
+      if (!result.ok && ctx.hasUI) ctx.ui.notify(result.message, "warning");
+      if (result.parentDispatch) {
+        return {
+          message: { customType: "pi-auto-router", content: result.parentDispatch, display: true },
+        };
       }
     } finally {
       judging = false;
@@ -371,12 +608,12 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
   function completeModels(prefix: string): { value: string; label: string; description: string }[] | null {
     if (!latestCtx) return null;
     const normalized = prefix.toLowerCase().trimStart();
-    const items = [JUDGE_CURRENT, "clear"]
+    const items = [JUDGE_CURRENT, JUDGE_HEURISTIC]
       .filter(value => value.startsWith(normalized))
       .map(value => ({
         value,
         label: value,
-        description: value === JUDGE_CURRENT ? "Judge with the selected model" : "Use the local heuristic",
+        description: value === JUDGE_CURRENT ? "Judge with the selected model (default)" : "Use the local heuristic",
       }));
     items.push(
       ...latestCtx.modelRegistry
@@ -459,7 +696,7 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
           if (ctx.hasUI) ctx.ui.notify(`Profile ${JSON.stringify(name)} already exists.`, "error");
           return;
         }
-        config.profiles[name] = { tiers: {} };
+        config.profiles[name] = { tiers: {}, judgeModel: JUDGE_CURRENT, judgeThinking: "high" };
         config.activeProfile = name;
         saveConfig(config);
         updateStatus(ctx);
@@ -521,20 +758,17 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("auto-router-judge", {
-    description: "Set judge model: /auto-router-judge <provider/model[:thinking]|current[:thinking]> | clear",
+    description: "Unrecommended: set a specific LLM judge. Default is Jev, then the prompted model. /auto-router-judge [provider/model[:thinking]|current[:thinking]|heuristic]",
     getArgumentCompletions: (prefix: string) => completeModels(prefix),
     handler: async (rawArgs: string, ctx: ExtensionCommandContext) => {
       const arg = rawArgs.trim();
       const profile = activeProfile(config);
       if (!arg) {
-        const message = profile.judgeModel
-          ? `Judge (profile ${config.activeProfile}): ${judgeLabel()}`
-          : `Judge (profile ${config.activeProfile}): heuristic (no model set)`;
-        if (ctx.hasUI) ctx.ui.notify(message, "info");
+        if (ctx.hasUI) ctx.ui.notify(`Judge (profile ${config.activeProfile}): ${judgeLabel()}`, "info");
         return;
       }
-      if (arg.toLowerCase() === "clear" || arg.toLowerCase() === "none") {
-        profile.judgeModel = undefined;
+      if (arg.toLowerCase() === "clear" || arg.toLowerCase() === "none" || arg.toLowerCase() === JUDGE_HEURISTIC) {
+        profile.judgeModel = JUDGE_HEURISTIC;
         saveConfig(config);
         if (ctx.hasUI) ctx.ui.notify("pi-auto-router: judge cleared; using heuristic.", "info");
         return;
@@ -576,6 +810,21 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
       const key = typesafeConfigured() ? "key present" : "no API key";
       if (ctx.hasUI) ctx.ui.notify(`pi-auto-router: jev ${config.useJev ? "on" : "off"} (${key}).`, "info");
       updateStatus(ctx);
+    },
+  });
+
+  pi.registerCommand("auto-router-split", {
+    description: "Toggle the pre-judge split check (route a request across several workers): /auto-router-split [on|off|status]",
+    handler: async (rawArgs: string, ctx: ExtensionCommandContext) => {
+      const arg = rawArgs.trim().toLowerCase();
+      if (arg === "on") config.splitCheckEnabled = true;
+      else if (arg === "off") config.splitCheckEnabled = false;
+      else if (arg && arg !== "status") {
+        if (ctx.hasUI) ctx.ui.notify('Expected "on", "off", or "status".', "error");
+        return;
+      }
+      if (arg === "on" || arg === "off") saveConfig(config);
+      if (ctx.hasUI) ctx.ui.notify(`pi-auto-router: split check ${config.splitCheckEnabled ? "on" : "off"}.`, "info");
     },
   });
 
@@ -660,7 +909,7 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
         return;
       }
       const result = await applyDecision(ctx, decision, "command");
-      if (ctx.hasUI) ctx.ui.notify(result.message, result.switched ? "info" : "warning");
+      if (ctx.hasUI) ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
   });
 }
