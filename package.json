@@ -9,11 +9,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dev-willbird1936/pi-auto-router.git"
+    "url": "git+https://github.com/dev-willbird1936/pi-auto-model-router.git"
   },
-  "homepage": "https://github.com/dev-willbird1936/pi-auto-router#readme",
+  "homepage": "https://github.com/dev-willbird1936/pi-auto-model-router#readme",
   "bugs": {
-    "url": "https://github.com/dev-willbird1936/pi-auto-router/issues"
+    "url": "https://github.com/dev-willbird1936/pi-auto-model-router/issues"
   },
   "keywords": ["pi-package", "pi-extension", "models", "router", "auto"],
   "type": "module",

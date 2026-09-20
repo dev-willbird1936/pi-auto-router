@@ -8,7 +8,7 @@ Choose one installation source.
 
 ```text
 pi install npm:pi-auto-model-router
-pi install git:github.com/dev-willbird1936/pi-auto-router
+pi install git:github.com/dev-willbird1936/pi-auto-model-router
 ```
 
 Restart Pi, or run `/reload` in an existing session.

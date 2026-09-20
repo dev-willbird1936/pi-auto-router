@@ -4,7 +4,7 @@
 
 ### Added
 
-- npm package name is `pi-auto-model-router`. GitHub repository stays `pi-auto-router`.
+- Package and GitHub repository are `pi-auto-model-router`.
 - Score-based auto router: eight shared bands (none through ultra), per-profile model tiers, and independent thinking resolution.
 - TypeSafe Jev scoring is on by default. Missing or failed Jev falls back to the prompted model as judge.
 - Split check, per-task routing, and none/minimal work answered in the parent chat.

@@ -16,13 +16,13 @@ None/minimal work never leaves the chat: the parent answers it directly (see [Sp
 ## Install
 
 ```text
-pi install git:github.com/dev-willbird1936/pi-auto-router
+pi install git:github.com/dev-willbird1936/pi-auto-model-router
 ```
 
 For a local checkout:
 
 ```text
-pi install /path/to/pi-auto-router
+pi install /path/to/pi-auto-model-router
 ```
 
 On Windows, `setup.bat` installs dependencies; `launch.bat` starts Pi with this source extension loaded temporarily. Restart Pi or run `/reload` after install.
