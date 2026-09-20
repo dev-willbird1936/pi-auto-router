@@ -1,7 +1,7 @@
 {
-  "name": "pi-auto-router",
+  "name": "pi-auto-model-router",
   "version": "0.1.0",
-  "description": "Score-based auto router for Pi Coding Agent: judge prompt scale, route none through ultra with intra-band model pick and switchable profiles.",
+  "description": "A Pi Coding Agent extension that scores requests and routes work to configured worker models and thinking levels while keeping the parent model selected.",
   "author": {
     "name": "dev-willbird1936",
     "url": "https://github.com/dev-willbird1936"
@@ -9,7 +9,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dev-willbird1936/pi-auto-router.git"
+    "url": "git+https://github.com/dev-willbird1936/pi-auto-router.git"
   },
   "homepage": "https://github.com/dev-willbird1936/pi-auto-router#readme",
   "bugs": {
@@ -20,7 +20,7 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "files": ["src", "web", "README.md", "LICENSE", "CHANGELOG.md", "setup.bat", "launch.bat", "launch-jev.bat"],
+  "files": ["src", "README.md", "LICENSE", "CHANGELOG.md", "HOW.md"],
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",

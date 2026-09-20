@@ -2,7 +2,15 @@
 
 ## [0.1.0] - 2026-09-19
 
-Initial GitHub-ready release of the experimental Jev-router default.
+### Added
+
+- npm package name is `pi-auto-model-router`. GitHub repository stays `pi-auto-router`.
+- Score-based auto router: eight shared bands (none through ultra), per-profile model tiers, and independent thinking resolution.
+- TypeSafe Jev scoring is on by default. Missing or failed Jev falls back to the prompted model as judge.
+- Split check, per-task routing, and none/minimal work answered in the parent chat.
+- Parent model stays unchanged; work is dispatched to `worker` subagents.
+
+The playground (`bun web/server.ts`) is checkout-only and is not in the npm package.
 
 - Score-based auto router for Pi Coding Agent: eight shared bands (none through ultra), per-profile model tiers, and independent thinking resolution.
 - TypeSafe Jev scoring is on by default (`useJev`). Missing or failed Jev falls back to the prompted model as judge. `/auto-router-jev off` uses that LLM judge only. `/auto-router-judge` can pin a specific model and thinking (unrecommended). The local heuristic is last resort.
